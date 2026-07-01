@@ -7,7 +7,12 @@ from unittest.mock import patch
 
 import pytest
 
-from wgtools.parser import WireGuardClientConfig, parse_config, _parse_ini_value
+from wgtools.parser import (
+    parse_config,
+    parse_wg_show,
+    _parse_ini_value,
+    _parse_int,
+)
 
 
 SAMPLE_CONF = """\
@@ -90,3 +95,93 @@ class TestParseConfig:
         with patch("wgtools.parser._derive_public_key", return_value="PUB"):
             config = parse_config(conf)
         assert config.preshared_key == ""
+
+
+# --- wg show <iface> dump parsing -------------------------------------------
+
+# Realistic single-interface `wg show <iface> dump`: line 1 is the interface
+# (private_key, public_key, listen_port, fwmark); each later line is one peer.
+# Fields are tab-separated.
+_IFACE_LINE = "\t".join(["PRIV_KEY_SECRET=", "IFACE_PUB=", "51820", "off"])
+_PEER1 = "\t".join(
+    [
+        "PEER1_PUB=",
+        "PEER1_PSK_SECRET=",
+        "203.0.113.10:51820",
+        "10.200.0.2/32",
+        "1719800000",
+        "123456",
+        "654321",
+        "25",
+    ]
+)
+_PEER2 = "\t".join(
+    ["PEER2_PUB=", "(none)", "(none)", "10.200.0.3/32", "0", "0", "0", "off"]
+)
+SAMPLE_DUMP = "\n".join([_IFACE_LINE, _PEER1, _PEER2]) + "\n"
+
+
+class TestParseInt:
+    def test_parses_number(self):
+        assert _parse_int("42") == 42
+
+    def test_strips_whitespace(self):
+        assert _parse_int("  7 ") == 7
+
+    def test_junk_returns_default(self):
+        assert _parse_int("off") == 0
+        assert _parse_int("", default=-1) == -1
+
+
+class TestParseWgShow:
+    def test_skips_interface_line_and_parses_peers(self):
+        peers = parse_wg_show(SAMPLE_DUMP)
+        assert len(peers) == 2
+        # The interface's private key must never appear in the output.
+        assert all(p.public_key != "IFACE_PUB=" for p in peers)
+        assert "PRIV_KEY_SECRET=" not in str([p.to_dict() for p in peers])
+
+    def test_peer_fields_typed(self):
+        peer = parse_wg_show(SAMPLE_DUMP)[0]
+        assert peer.public_key == "PEER1_PUB="
+        assert peer.endpoint == "203.0.113.10:51820"
+        assert peer.allowed_ips == "10.200.0.2/32"
+        assert peer.latest_handshake == 1719800000
+        assert peer.transfer_rx == 123456
+        assert peer.transfer_tx == 654321
+        assert peer.persistent_keepalive == 25
+
+    def test_never_surfaces_preshared_key(self):
+        peer = parse_wg_show(SAMPLE_DUMP)[0]
+        d = peer.to_dict()
+        assert "preshared_key" not in d
+        assert "PEER1_PSK_SECRET=" not in str(d)
+
+    def test_keepalive_off_is_none(self):
+        peer2 = parse_wg_show(SAMPLE_DUMP)[1]
+        assert peer2.persistent_keepalive is None
+        assert peer2.latest_handshake == 0
+        assert peer2.transfer_rx == 0
+
+    def test_interface_only_yields_no_peers(self):
+        assert parse_wg_show(_IFACE_LINE + "\n") == []
+
+    def test_empty_input_yields_no_peers(self):
+        assert parse_wg_show("") == []
+        assert parse_wg_show("\n\n") == []
+
+    def test_malformed_peer_line_skipped(self):
+        dump = "\n".join([_IFACE_LINE, "TOO\tFEW\tFIELDS", _PEER1]) + "\n"
+        peers = parse_wg_show(dump)
+        assert len(peers) == 1
+        assert peers[0].public_key == "PEER1_PUB="
+
+    def test_malformed_counter_degrades_to_zero(self):
+        bad = "\t".join(
+            ["PB=", "(none)", "1.2.3.4:1", "10.0.0.9/32", "notanint", "x", "y", "off"]
+        )
+        dump = "\n".join([_IFACE_LINE, bad]) + "\n"
+        peer = parse_wg_show(dump)[0]
+        assert peer.latest_handshake == 0
+        assert peer.transfer_rx == 0
+        assert peer.transfer_tx == 0
