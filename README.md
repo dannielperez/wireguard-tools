@@ -1,6 +1,6 @@
 # wireguard-tools (`wgtools`)
 
-Parse WireGuard client `.conf` files and extract the fields needed to re-add clients on the server side (Ruijie gateway, Linux WireGuard, etc.).
+Parse WireGuard client `.conf` files and extract the fields needed to re-add clients on the server side (e.g. a Linux WireGuard server or router gateway).
 
 ## Install
 
