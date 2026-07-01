@@ -1,7 +1,7 @@
 """WireGuard config file parser.
 
 Parses WireGuard client .conf files and extracts the fields needed
-to re-add VPN clients to a server (e.g. Ruijie gateway):
+to re-add VPN clients to a server (e.g. a router or Linux WireGuard server):
 
 - Username (from filename)
 - Interface IP (from [Interface] Address)
