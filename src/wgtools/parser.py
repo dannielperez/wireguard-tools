@@ -7,6 +7,10 @@ to re-add VPN clients to a server (e.g. Ruijie gateway):
 - Interface IP (from [Interface] Address)
 - Public Key (derived from PrivateKey via ``wg pubkey``)
 - Pre-Shared Key (from [Peer] PresharedKey)
+
+Also parses the live runtime status of an interface from ``wg show <iface>
+dump`` into per-peer transfer counters (:func:`parse_wg_show`), for callers
+that need to measure throughput (e.g. a bandwidth-aware hub-assignment sampler).
 """
 
 from __future__ import annotations
@@ -142,3 +146,96 @@ def parse_configs(directory: Path) -> list[WireGuardClientConfig]:
     for conf in sorted(directory.rglob("*.conf")):
         configs.append(parse_config(conf))
     return configs
+
+
+@dataclass
+class WireGuardPeerTransfer:
+    """Per-peer runtime transfer counters parsed from ``wg show <iface> dump``.
+
+    Counters are cumulative byte totals since the interface came up; a caller
+    derives throughput by sampling twice and dividing the delta by the interval.
+    The peer's preshared key (present in the dump) is intentionally NOT captured
+    — this module never surfaces secret material.
+    """
+
+    public_key: str
+    endpoint: str  # "(none)" when the peer has no known endpoint yet.
+    allowed_ips: str
+    latest_handshake: int  # epoch seconds; 0 = never handshaked.
+    transfer_rx: int  # bytes received from this peer.
+    transfer_tx: int  # bytes sent to this peer.
+    persistent_keepalive: int | None  # seconds; None when "off".
+
+    def to_dict(self) -> dict:
+        return {
+            "public_key": self.public_key,
+            "endpoint": self.endpoint,
+            "allowed_ips": self.allowed_ips,
+            "latest_handshake": self.latest_handshake,
+            "transfer_rx": self.transfer_rx,
+            "transfer_tx": self.transfer_tx,
+            "persistent_keepalive": self.persistent_keepalive,
+        }
+
+
+def _parse_int(value: str, default: int = 0) -> int:
+    """Parse an integer field leniently — junk degrades to ``default``.
+
+    Catches a single exception (``ValueError``): the input is always a string
+    field split from the dump, so ``int()`` can only raise ``ValueError``. A
+    single exception also avoids the py3.14-vs-3.11 ``except``-tuple
+    parenthesization split (this package targets ``>=3.11``).
+    """
+    try:
+        return int(value.strip())
+    except ValueError:
+        return default
+
+
+def parse_wg_show(dump: str) -> list[WireGuardPeerTransfer]:
+    """Parse ``wg show <iface> dump`` output into per-peer transfer counters.
+
+    The ``dump`` format is tab-separated and stable across wireguard-tools
+    releases. The FIRST line describes the interface itself (private_key,
+    public_key, listen_port, fwmark) and is skipped — its private key is never
+    surfaced. Each subsequent line is one peer::
+
+        public_key  preshared_key  endpoint  allowed_ips  latest_handshake
+        transfer_rx  transfer_tx  persistent_keepalive
+
+    Numeric fields parse leniently (a malformed counter degrades to 0) and lines
+    with too few fields are skipped, so a caller on a sampling path is never
+    broken by unexpected output. Blank lines are ignored, and dump text with no
+    peers (interface line only, or empty) yields an empty list.
+
+    Args:
+        dump: stdout of ``wg show <iface> dump`` for a SINGLE interface. (The
+            ``wg show all dump`` variant prefixes an interface-name column and is
+            out of scope — call this per interface.)
+
+    Returns:
+        One :class:`WireGuardPeerTransfer` per peer line, in input order.
+    """
+    lines = [line for line in dump.splitlines() if line.strip()]
+    peers: list[WireGuardPeerTransfer] = []
+    # lines[0] is the interface itself (carries the private key) — skip it.
+    for line in lines[1:]:
+        fields = line.split("\t")
+        if len(fields) < 8:
+            continue
+        public_key, _psk, endpoint, allowed_ips, handshake, rx, tx, keepalive = fields[:8]
+        keepalive = keepalive.strip()
+        peers.append(
+            WireGuardPeerTransfer(
+                public_key=public_key,
+                endpoint=endpoint,
+                allowed_ips=allowed_ips,
+                latest_handshake=_parse_int(handshake),
+                transfer_rx=_parse_int(rx),
+                transfer_tx=_parse_int(tx),
+                persistent_keepalive=(
+                    None if keepalive in ("off", "") else _parse_int(keepalive)
+                ),
+            ),
+        )
+    return peers
