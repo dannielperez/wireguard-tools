@@ -8,10 +8,11 @@ from unittest.mock import patch
 import pytest
 
 from wgtools.parser import (
-    parse_config,
-    parse_wg_show,
     _parse_ini_value,
     _parse_int,
+    parse_config,
+    parse_wg_dump,
+    parse_wg_show,
 )
 
 
@@ -185,3 +186,41 @@ class TestParseWgShow:
         assert peer.latest_handshake == 0
         assert peer.transfer_rx == 0
         assert peer.transfer_tx == 0
+
+
+class TestParseWgDump:
+    def test_parses_typed_interface_and_peers_without_secrets(self):
+        runtime = parse_wg_dump(SAMPLE_DUMP)
+
+        assert runtime.public_key == "IFACE_PUB="
+        assert runtime.listen_port == 51820
+        assert runtime.fwmark == "off"
+        assert len(runtime.peers) == 2
+        assert runtime.peers[0].public_key == "PEER1_PUB="
+        assert runtime.peers[0].transfer_rx == 123456
+        assert "PRIV_KEY_SECRET=" not in repr(runtime)
+        assert "PEER1_PSK_SECRET=" not in repr(runtime)
+
+    def test_malformed_numeric_fields_remain_unknown(self):
+        bad = "\t".join(
+            [
+                "PB=",
+                "(none)",
+                "1.2.3.4:1",
+                "10.0.0.9/32",
+                "notanint",
+                "x",
+                "y",
+                "broken",
+            ]
+        )
+
+        runtime = parse_wg_dump("\n".join([_IFACE_LINE, bad]) + "\n")
+
+        assert runtime.peers[0].latest_handshake is None
+        assert runtime.peers[0].transfer_rx is None
+        assert runtime.peers[0].transfer_tx is None
+        assert runtime.peers[0].persistent_keepalive is None
+
+    def test_empty_input_returns_an_empty_projection(self):
+        assert parse_wg_dump("") == parse_wg_dump("\n\n")

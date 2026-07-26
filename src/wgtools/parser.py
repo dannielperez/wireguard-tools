@@ -239,3 +239,77 @@ def parse_wg_show(dump: str) -> list[WireGuardPeerTransfer]:
             ),
         )
     return peers
+
+
+@dataclass(frozen=True)
+class WireGuardRuntimePeer:
+    """Secret-free peer projection for application runtime consumers."""
+
+    public_key: str
+    endpoint: str
+    allowed_ips: str
+    latest_handshake: int | None
+    transfer_rx: int | None
+    transfer_tx: int | None
+    persistent_keepalive: int | None
+
+
+@dataclass(frozen=True)
+class WireGuardRuntimeDump:
+    """Typed, secret-free projection of a single-interface runtime dump."""
+
+    public_key: str
+    listen_port: int | None
+    fwmark: str
+    peers: tuple[WireGuardRuntimePeer, ...]
+
+
+def _parse_optional_int(value: str) -> int | None:
+    try:
+        return int(value.strip())
+    except ValueError:
+        return None
+
+
+def parse_wg_dump(dump: str) -> WireGuardRuntimeDump:
+    """Parse a complete ``wg show <iface> dump`` without exposing secrets.
+
+    The interface private key and each peer preshared key are deliberately
+    skipped. Malformed numeric fields remain unknown (``None``), allowing
+    application health consumers to distinguish invalid data from real zero
+    counters. The existing :func:`parse_wg_show` parser remains the canonical
+    peer-row parser and supplies the non-secret peer fields.
+    """
+    lines = [line for line in dump.splitlines() if line.strip()]
+    if not lines:
+        return WireGuardRuntimeDump("", None, "", ())
+
+    interface = lines[0].split("\t")
+    interface.extend([""] * (4 - len(interface)))
+    peer_rows = [
+        fields
+        for line in lines[1:]
+        if len(fields := line.split("\t")) >= 8
+    ]
+    peers = tuple(
+        WireGuardRuntimePeer(
+            public_key=peer.public_key,
+            endpoint=peer.endpoint,
+            allowed_ips=peer.allowed_ips,
+            latest_handshake=_parse_optional_int(fields[4]),
+            transfer_rx=_parse_optional_int(fields[5]),
+            transfer_tx=_parse_optional_int(fields[6]),
+            persistent_keepalive=(
+                None
+                if fields[7].strip() in {"", "off"}
+                else _parse_optional_int(fields[7])
+            ),
+        )
+        for peer, fields in zip(parse_wg_show(dump), peer_rows, strict=True)
+    )
+    return WireGuardRuntimeDump(
+        public_key=interface[1],
+        listen_port=_parse_optional_int(interface[2]),
+        fwmark=interface[3],
+        peers=peers,
+    )
