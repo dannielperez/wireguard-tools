@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68.0"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "wgtools"
@@ -11,8 +11,8 @@ requires-python = ">=3.11"
 [project.scripts]
 wgtools = "wgtools.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.hatch.build.targets.wheel]
+packages = ["src/wgtools"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
