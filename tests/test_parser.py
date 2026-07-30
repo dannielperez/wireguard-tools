@@ -11,6 +11,7 @@ from wgtools.parser import (
     _parse_ini_value,
     _parse_int,
     parse_config,
+    parse_endpoint,
     parse_wg_dump,
     parse_wg_show,
 )
@@ -134,6 +135,38 @@ class TestParseInt:
         assert _parse_int("", default=-1) == -1
 
 
+class TestParseEndpoint:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("1.2.3.4:51820", ("1.2.3.4", 51820)),
+            ("[2001:db8::1]:51820", ("2001:db8::1", 51820)),
+            ("VPN.Example.COM", ("vpn.example.com", None)),
+            ("  VPN.Example.COM:51820  ", ("vpn.example.com", 51820)),
+            ("(none)", (None, None)),
+            ("", (None, None)),
+            ("not a valid endpoint", (None, None)),
+            ("1.2.3.4:0", (None, None)),
+            ("1.2.3.4:65536", (None, None)),
+            ("1.2.3.4:not-a-port", (None, None)),
+        ],
+    )
+    def test_parses_supported_values_and_rejects_invalid_values(self, value, expected):
+        assert parse_endpoint(value) == expected
+
+    def test_exact_host_comparison_does_not_match_ipv4_substring(self):
+        endpoint_host, _ = parse_endpoint("110.0.0.1:51820")
+
+        assert endpoint_host == "110.0.0.1"
+        assert endpoint_host != "10.0.0.1"
+
+    def test_port_digits_are_not_an_endpoint_host_match(self):
+        endpoint_host, _ = parse_endpoint("203.0.113.10:51820")
+
+        assert endpoint_host == "203.0.113.10"
+        assert endpoint_host != "5182"
+
+
 class TestParseWgShow:
     def test_skips_interface_line_and_parses_peers(self):
         peers = parse_wg_show(SAMPLE_DUMP)
@@ -146,6 +179,8 @@ class TestParseWgShow:
         peer = parse_wg_show(SAMPLE_DUMP)[0]
         assert peer.public_key == "PEER1_PUB="
         assert peer.endpoint == "203.0.113.10:51820"
+        assert peer.endpoint_host == "203.0.113.10"
+        assert peer.endpoint_port == 51820
         assert peer.allowed_ips == "10.200.0.2/32"
         assert peer.latest_handshake == 1719800000
         assert peer.transfer_rx == 123456
@@ -155,6 +190,8 @@ class TestParseWgShow:
     def test_never_surfaces_preshared_key(self):
         peer = parse_wg_show(SAMPLE_DUMP)[0]
         d = peer.to_dict()
+        assert d["endpoint_host"] == "203.0.113.10"
+        assert d["endpoint_port"] == 51820
         assert "preshared_key" not in d
         assert "PEER1_PSK_SECRET=" not in str(d)
 
@@ -187,6 +224,26 @@ class TestParseWgShow:
         assert peer.transfer_rx == 0
         assert peer.transfer_tx == 0
 
+    def test_preserves_raw_endpoint_while_exposing_parsed_values(self):
+        raw_endpoint = "  [2001:DB8::1]:51820  "
+        peer_row = "\t".join(
+            ["PB=", "(none)", raw_endpoint, "10.0.0.9/32", "0", "0", "0", "off"]
+        )
+
+        peer = parse_wg_show("\n".join([_IFACE_LINE, peer_row]) + "\n")[0]
+
+        assert peer.endpoint == raw_endpoint
+        assert peer.endpoint_host == "2001:db8::1"
+        assert peer.endpoint_port == 51820
+
+    def test_parsed_endpoint_properties_are_read_only(self):
+        peer = parse_wg_show(SAMPLE_DUMP)[0]
+
+        with pytest.raises(AttributeError):
+            peer.endpoint_host = "example.com"
+        with pytest.raises(AttributeError):
+            peer.endpoint_port = 1234
+
 
 class TestParseWgDump:
     def test_parses_typed_interface_and_peers_without_secrets(self):
@@ -197,6 +254,12 @@ class TestParseWgDump:
         assert runtime.fwmark == "off"
         assert len(runtime.peers) == 2
         assert runtime.peers[0].public_key == "PEER1_PUB="
+        assert runtime.peers[0].endpoint == "203.0.113.10:51820"
+        assert runtime.peers[0].endpoint_host == "203.0.113.10"
+        assert runtime.peers[0].endpoint_port == 51820
+        assert runtime.peers[1].endpoint == "(none)"
+        assert runtime.peers[1].endpoint_host is None
+        assert runtime.peers[1].endpoint_port is None
         assert runtime.peers[0].transfer_rx == 123456
         assert "PRIV_KEY_SECRET=" not in repr(runtime)
         assert "PEER1_PSK_SECRET=" not in repr(runtime)
@@ -221,6 +284,19 @@ class TestParseWgDump:
         assert runtime.peers[0].transfer_rx is None
         assert runtime.peers[0].transfer_tx is None
         assert runtime.peers[0].persistent_keepalive is None
+
+    def test_preserves_raw_endpoint_while_exposing_parsed_values(self):
+        raw_endpoint = "  VPN.Example.COM:51820  "
+        peer_row = "\t".join(
+            ["PB=", "(none)", raw_endpoint, "10.0.0.9/32", "0", "0", "0", "off"]
+        )
+
+        runtime = parse_wg_dump("\n".join([_IFACE_LINE, peer_row]) + "\n")
+        peer = runtime.peers[0]
+
+        assert peer.endpoint == raw_endpoint
+        assert peer.endpoint_host == "vpn.example.com"
+        assert peer.endpoint_port == 51820
 
     def test_empty_input_returns_an_empty_projection(self):
         assert parse_wg_dump("") == parse_wg_dump("\n\n")

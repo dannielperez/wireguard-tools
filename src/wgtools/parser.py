@@ -15,6 +15,7 @@ that need to measure throughput (e.g. a bandwidth-aware hub-assignment sampler).
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import subprocess
 from dataclasses import dataclass
@@ -65,7 +66,9 @@ def _derive_public_key(private_key: str) -> str:
 
 def _parse_ini_value(text: str, key: str) -> str:
     """Extract a value from INI-style config (case-insensitive key)."""
-    m = re.search(rf"^\s*{re.escape(key)}\s*=\s*(.+)$", text, re.MULTILINE | re.IGNORECASE)
+    m = re.search(
+        rf"^\s*{re.escape(key)}\s*=\s*(.+)$", text, re.MULTILINE | re.IGNORECASE
+    )
     return m.group(1).strip() if m else ""
 
 
@@ -148,6 +151,90 @@ def parse_configs(directory: Path) -> list[WireGuardClientConfig]:
     return configs
 
 
+_HOST_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_MAX_HOSTNAME_LENGTH = 253
+_MAX_ENDPOINT_PORT = 65535
+_UNPARSEABLE_ENDPOINT: tuple[None, None] = (None, None)
+
+
+def _is_valid_endpoint_host(host: str) -> bool:
+    """Return whether ``host`` is an IPv4 address or DNS hostname."""
+    try:
+        return isinstance(ipaddress.ip_address(host), ipaddress.IPv4Address)
+    except ValueError:
+        pass
+
+    hostname = host[:-1] if host.endswith(".") else host
+    if not hostname or len(hostname) > _MAX_HOSTNAME_LENGTH:
+        return False
+    # A dotted, all-numeric value is intended as IPv4 and must not fall back to
+    # being accepted as a DNS name after strict IP validation fails.
+    labels = hostname.split(".")
+    if "." in hostname and all(label.isascii() and label.isdigit() for label in labels):
+        return False
+    return all(_HOST_LABEL_RE.fullmatch(label) for label in hostname.lower().split("."))
+
+
+def _parse_endpoint_port(value: str) -> int | None:
+    """Parse a decimal WireGuard endpoint port in the valid TCP/UDP range."""
+    if not value or not value.isascii() or not value.isdigit():
+        return None
+    port = int(value)
+    return port if 1 <= port <= _MAX_ENDPOINT_PORT else None
+
+
+def _parse_bracketed_endpoint(endpoint: str) -> tuple[str | None, int | None]:
+    """Parse a bracketed IPv6 WireGuard endpoint."""
+    match = re.fullmatch(r"\[([^][]+)\]:([^:]+)", endpoint)
+    if match is None:
+        return _UNPARSEABLE_ENDPOINT
+    host, port_value = match.groups()
+    port = _parse_endpoint_port(port_value)
+    if port is None:
+        return _UNPARSEABLE_ENDPOINT
+    try:
+        ipaddress.IPv6Address(host)
+    except ValueError:
+        return _UNPARSEABLE_ENDPOINT
+    return host.lower(), port
+
+
+def _parse_unbracketed_endpoint(endpoint: str) -> tuple[str | None, int | None]:
+    """Parse an IPv4 or DNS endpoint with an optional port."""
+    colon_count = endpoint.count(":")
+    if colon_count == 1:
+        host, port_value = endpoint.rsplit(":", 1)
+        port = _parse_endpoint_port(port_value)
+        if port is None:
+            return _UNPARSEABLE_ENDPOINT
+    elif colon_count == 0:
+        host, port = endpoint, None
+    else:
+        return _UNPARSEABLE_ENDPOINT
+
+    if not _is_valid_endpoint_host(host):
+        return _UNPARSEABLE_ENDPOINT
+    return host.lower(), port
+
+
+def parse_endpoint(value: str) -> tuple[str | None, int | None]:
+    """Parse a WireGuard endpoint into a normalized host and optional port.
+
+    WireGuard renders IPv6 endpoints as ``[host]:port``. Unbracketed values
+    containing multiple colons are rejected rather than guessing whether the
+    final component is a port. Invalid values degrade to ``(None, None)``.
+    """
+    endpoint = value.strip()
+    if not endpoint or endpoint.lower() == "(none)":
+        return _UNPARSEABLE_ENDPOINT
+
+    if endpoint.startswith("["):
+        return _parse_bracketed_endpoint(endpoint)
+    if "[" in endpoint or "]" in endpoint:
+        return _UNPARSEABLE_ENDPOINT
+    return _parse_unbracketed_endpoint(endpoint)
+
+
 @dataclass
 class WireGuardPeerTransfer:
     """Per-peer runtime transfer counters parsed from ``wg show <iface> dump``.
@@ -166,10 +253,22 @@ class WireGuardPeerTransfer:
     transfer_tx: int  # bytes sent to this peer.
     persistent_keepalive: int | None  # seconds; None when "off".
 
+    @property
+    def endpoint_host(self) -> str | None:
+        """Normalized endpoint host, or ``None`` when it cannot be parsed."""
+        return parse_endpoint(self.endpoint)[0]
+
+    @property
+    def endpoint_port(self) -> int | None:
+        """Validated endpoint port, or ``None`` when absent or unparseable."""
+        return parse_endpoint(self.endpoint)[1]
+
     def to_dict(self) -> dict:
         return {
             "public_key": self.public_key,
             "endpoint": self.endpoint,
+            "endpoint_host": self.endpoint_host,
+            "endpoint_port": self.endpoint_port,
             "allowed_ips": self.allowed_ips,
             "latest_handshake": self.latest_handshake,
             "transfer_rx": self.transfer_rx,
@@ -223,7 +322,9 @@ def parse_wg_show(dump: str) -> list[WireGuardPeerTransfer]:
         fields = line.split("\t")
         if len(fields) < 8:
             continue
-        public_key, _psk, endpoint, allowed_ips, handshake, rx, tx, keepalive = fields[:8]
+        public_key, _psk, endpoint, allowed_ips, handshake, rx, tx, keepalive = fields[
+            :8
+        ]
         keepalive = keepalive.strip()
         peers.append(
             WireGuardPeerTransfer(
@@ -252,6 +353,16 @@ class WireGuardRuntimePeer:
     transfer_rx: int | None
     transfer_tx: int | None
     persistent_keepalive: int | None
+
+    @property
+    def endpoint_host(self) -> str | None:
+        """Normalized endpoint host, or ``None`` when it cannot be parsed."""
+        return parse_endpoint(self.endpoint)[0]
+
+    @property
+    def endpoint_port(self) -> int | None:
+        """Validated endpoint port, or ``None`` when absent or unparseable."""
+        return parse_endpoint(self.endpoint)[1]
 
 
 @dataclass(frozen=True)
@@ -286,11 +397,7 @@ def parse_wg_dump(dump: str) -> WireGuardRuntimeDump:
 
     interface = lines[0].split("\t")
     interface.extend([""] * (4 - len(interface)))
-    peer_rows = [
-        fields
-        for line in lines[1:]
-        if len(fields := line.split("\t")) >= 8
-    ]
+    peer_rows = [fields for line in lines[1:] if len(fields := line.split("\t")) >= 8]
     peers = tuple(
         WireGuardRuntimePeer(
             public_key=peer.public_key,
