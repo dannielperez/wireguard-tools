@@ -10,8 +10,10 @@ from .parser import (
     WireGuardPeerTransfer,
     WireGuardRuntimeDump,
     WireGuardRuntimePeer,
+    normalize_host,
     parse_config,
     parse_configs,
+    parse_endpoint,
     parse_wg_dump,
     parse_wg_show,
 )
@@ -21,8 +23,10 @@ __all__ = [
     "WireGuardPeerTransfer",
     "WireGuardRuntimeDump",
     "WireGuardRuntimePeer",
+    "normalize_host",
     "parse_config",
     "parse_configs",
+    "parse_endpoint",
     "parse_wg_dump",
     "parse_wg_show",
 ]

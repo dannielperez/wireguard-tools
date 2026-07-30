@@ -10,12 +10,12 @@ import pytest
 from wgtools.parser import (
     _parse_ini_value,
     _parse_int,
+    normalize_host,
     parse_config,
     parse_endpoint,
     parse_wg_dump,
     parse_wg_show,
 )
-
 
 SAMPLE_CONF = """\
 [Interface]
@@ -165,6 +165,40 @@ class TestParseEndpoint:
 
         assert endpoint_host == "203.0.113.10"
         assert endpoint_host != "5182"
+
+
+class TestNormalizeHost:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("2001:db8::1", "2001:db8::1"),
+            ("2001:0DB8:0000::0001", "2001:db8::1"),
+            ("[2001:db8::1]", "2001:db8::1"),
+            ("203.0.113.10", "203.0.113.10"),
+            ("  VPN.Example.COM.  ", "vpn.example.com"),
+            ("my_site.ddns.net", "my_site.ddns.net"),
+            ("", None),
+            ("   ", None),
+            ("(none)", None),
+            ("1.2.3.4:51820", None),
+            ("[2001:db8::1]:51820", None),
+            ("not a host", None),
+            ("10.0.0.0/8", None),
+        ],
+    )
+    def test_normalizes_supported_values_and_rejects_invalid_values(
+        self, value, expected,
+    ):
+        assert normalize_host(value) == expected
+
+    def test_bare_ipv6_matches_bracketed_endpoint_host(self):
+        assert normalize_host("2001:db8::1") == parse_endpoint(
+            "[2001:0DB8::0001]:51820",
+        )[0]
+
+    def test_bare_ipv6_is_a_host_but_not_an_endpoint(self):
+        assert parse_endpoint("2001:db8::1") == (None, None)
+        assert normalize_host("2001:db8::1") == "2001:db8::1"
 
 
 class TestParseWgShow:

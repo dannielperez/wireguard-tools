@@ -152,9 +152,26 @@ def parse_configs(directory: Path) -> list[WireGuardClientConfig]:
 
 
 _HOST_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_CONFIG_HOST_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?")
 _MAX_HOSTNAME_LENGTH = 253
 _MAX_ENDPOINT_PORT = 65535
 _UNPARSEABLE_ENDPOINT: tuple[None, None] = (None, None)
+
+
+def _normalize_hostname(host: str, label_re: re.Pattern[str]) -> str | None:
+    """Normalize a DNS hostname under the given per-label grammar, or None."""
+    hostname = host[:-1] if host.endswith(".") else host
+    if not hostname or len(hostname) > _MAX_HOSTNAME_LENGTH:
+        return None
+    labels = hostname.split(".")
+    # A dotted, all-numeric value is intended as IPv4 and must not fall back to
+    # being accepted as a DNS name after strict IP validation fails.
+    if "." in hostname and all(label.isascii() and label.isdigit() for label in labels):
+        return None
+    normalized_hostname = hostname.lower()
+    if not all(label_re.fullmatch(label) for label in normalized_hostname.split(".")):
+        return None
+    return normalized_hostname
 
 
 def _is_valid_endpoint_host(host: str) -> bool:
@@ -164,15 +181,37 @@ def _is_valid_endpoint_host(host: str) -> bool:
     except ValueError:
         pass
 
-    hostname = host[:-1] if host.endswith(".") else host
-    if not hostname or len(hostname) > _MAX_HOSTNAME_LENGTH:
-        return False
-    # A dotted, all-numeric value is intended as IPv4 and must not fall back to
-    # being accepted as a DNS name after strict IP validation fails.
-    labels = hostname.split(".")
-    if "." in hostname and all(label.isascii() and label.isdigit() for label in labels):
-        return False
-    return all(_HOST_LABEL_RE.fullmatch(label) for label in hostname.lower().split("."))
+    return _normalize_hostname(host, _HOST_LABEL_RE) is not None
+
+
+def _normalize_config_hostname(host: str) -> str | None:
+    """Normalize a DNS host using the stored-config hostname grammar."""
+    # Stored config hosts may contain DDNS underscores; wg show endpoints use
+    # resolved IPs and deliberately retain the stricter endpoint grammar above.
+    return _normalize_hostname(host, _CONFIG_HOST_LABEL_RE)
+
+
+def normalize_host(value: str) -> str | None:
+    """Normalize a stored IPv4, IPv6, or DNS host without an endpoint port."""
+    host = value.strip()
+    if not host or host.lower() == "(none)":
+        return None
+
+    bracketed = host.startswith("[") or host.endswith("]")
+    if bracketed and not (host.startswith("[") and host.endswith("]")):
+        return None
+    ipv6_host = host[1:-1] if bracketed else host
+    try:
+        return ipaddress.IPv6Address(ipv6_host).compressed
+    except ValueError:
+        if bracketed:
+            return None
+
+    try:
+        ipaddress.IPv4Address(host)
+    except ValueError:
+        return _normalize_config_hostname(host)
+    return host
 
 
 def _parse_endpoint_port(value: str) -> int | None:
@@ -193,10 +232,10 @@ def _parse_bracketed_endpoint(endpoint: str) -> tuple[str | None, int | None]:
     if port is None:
         return _UNPARSEABLE_ENDPOINT
     try:
-        ipaddress.IPv6Address(host)
+        normalized_host = ipaddress.IPv6Address(host).compressed
     except ValueError:
         return _UNPARSEABLE_ENDPOINT
-    return host.lower(), port
+    return normalized_host, port
 
 
 def _parse_unbracketed_endpoint(endpoint: str) -> tuple[str | None, int | None]:

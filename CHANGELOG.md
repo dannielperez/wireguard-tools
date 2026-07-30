@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-07-30
+
+### Added
+- `normalize_host` for canonicalizing stored IPv4, IPv6, and DNS hosts without
+  accepting endpoint ports. Stored DNS hosts may contain DDNS underscores.
+
+### Changed
+- Bracketed IPv6 endpoint hosts are now returned in canonical compressed form.
+- `normalize_host` and `parse_endpoint` are exported from the top-level
+  `wgtools` package.
+
 ## [0.2.0] - 2026-07-01
 
 ### Added
